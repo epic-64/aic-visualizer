@@ -239,9 +239,9 @@ fn chat(f: &mut Frame, app: &App) {
         Span::styled("Total: ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(format!("${:.4}", app.total_cost()), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
         Span::raw("   "),
-        Span::styled(format!("cached {tc}  input {ti}  output {to}  thinking {tt}"), Style::default().fg(Color::Gray)),
+        Span::styled(format!("cached {}  input {}  output {}  thinking {}", fmt_tok(tc), fmt_tok(ti), fmt_tok(to), fmt_tok(tt)), Style::default().fg(Color::Gray)),
         Span::raw("   "),
-        Span::styled(format!("next turn cache: {} tok", app.carried_cached), Style::default().fg(Color::Yellow)),
+        Span::styled(format!("next turn cache: {} tok", fmt_tok(app.carried_cached)), Style::default().fg(Color::Yellow)),
     ]);
     f.render_widget(
         Paragraph::new(summary).block(Block::default().borders(Borders::ALL).title(" Conversation ")),
@@ -290,6 +290,8 @@ fn chat(f: &mut Frame, app: &App) {
         lines.push(Line::from(vec![
             Span::styled(format!("#{} ", i + 1), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
             Span::raw(t.raw.clone()),
+            Span::raw("  "),
+            Span::styled(format!("${:.4}", t.cost), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
         ]));
         // Per-component cost (dimmed, in parens) using the active model's rates.
         // Thinking tokens bill at the output rate.
@@ -305,23 +307,21 @@ fn chat(f: &mut Frame, app: &App) {
         let dim = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
         let mut detail = vec![
             Span::styled("    cached ", Style::default().fg(Color::DarkGray)),
-            Span::raw(t.cached.to_string()),
+            Span::raw(fmt_tok(t.cached)),
             Span::styled(format!(" (${cached_cost:.4})"), dim),
             Span::styled("  input ", Style::default().fg(Color::DarkGray)),
-            Span::raw(t.input.to_string()),
+            Span::raw(fmt_tok(t.input)),
             Span::styled(format!(" (${input_cost:.4})"), dim),
             Span::styled("  output ", Style::default().fg(Color::DarkGray)),
-            Span::raw(t.output.to_string()),
+            Span::raw(fmt_tok(t.output)),
             Span::styled(format!(" (${output_cost:.4})"), dim),
         ];
         // Only show the thinking component when there is any.
         if t.thinking > 0 {
             detail.push(Span::styled("  thinking ", Style::default().fg(Color::DarkGray)));
-            detail.push(Span::raw(t.thinking.to_string()));
+            detail.push(Span::raw(fmt_tok(t.thinking)));
             detail.push(Span::styled(format!(" (${thinking_cost:.4})"), dim));
         }
-        detail.push(Span::styled("   → ", Style::default().fg(Color::DarkGray)));
-        detail.push(Span::styled(format!("${:.4}", t.cost), Style::default().fg(Color::Green)));
         lines.push(Line::from(detail));
     }
     // Markers placed after the most recent turn.
@@ -567,12 +567,14 @@ fn cost_chart(
         marker_xs.iter().map(|&x| [(x, 0.0), (x, y_max)]).collect();
     let marker_style = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
 
-    // Markers first so the cost series draw on top of them.
+    // Markers first so the cost series draw on top of them. Always drawn with
+    // the Braille marker so they read as thin dotted lines, even on the
+    // per-turn chart whose bars use the chunkier HalfBlock marker.
     let mut datasets: Vec<Dataset> = marker_lines
         .iter()
         .map(|line| {
             Dataset::default()
-                .marker(marker)
+                .marker(Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(marker_style)
                 .data(line)
@@ -664,6 +666,26 @@ fn draw_segment_labels(
         let start = (center - w as f64 / 2.0).round().max(graph_x as f64) as u16;
         let start = start.min(graph_x + graph_w.saturating_sub(w));
         f.buffer_mut().set_stringn(start, inner.top(), text, graph_w as usize, style);
+    }
+}
+
+/// Format a token count compactly with a magnitude suffix, e.g. 950 -> "950",
+/// 12000 -> "12k", 12300 -> "12.3k", 1_500_000 -> "1.5m". A trailing ".0" is
+/// dropped so round values stay clean.
+fn fmt_tok(n: u64) -> String {
+    fn scaled(v: f64, suffix: &str) -> String {
+        if (v.fract()).abs() < 0.05 {
+            format!("{:.0}{suffix}", v)
+        } else {
+            format!("{:.1}{suffix}", v)
+        }
+    }
+    if n >= 1_000_000 {
+        scaled(n as f64 / 1e6, "m")
+    } else if n >= 1_000 {
+        scaled(n as f64 / 1e3, "k")
+    } else {
+        n.to_string()
     }
 }
 
