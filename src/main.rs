@@ -7,7 +7,10 @@ mod ui;
 use std::io;
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -36,8 +39,18 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) 
     loop {
         terminal.draw(|f| ui::render(f, app))?;
 
-        let Event::Key(key) = event::read()? else {
-            continue;
+        let key = match event::read()? {
+            Event::Key(key) => key,
+            // Mouse wheel scrolls the turn history while chatting.
+            Event::Mouse(m) if app.screen == Screen::Chat => {
+                match m.kind {
+                    MouseEventKind::ScrollUp => app.scroll_history_up(),
+                    MouseEventKind::ScrollDown => app.scroll_history_down(),
+                    _ => {}
+                }
+                continue;
+            }
+            _ => continue,
         };
         if key.kind != KeyEventKind::Press {
             continue;
@@ -116,12 +129,20 @@ fn handle_custom_model(app: &mut App, code: KeyCode) {
 }
 
 fn handle_chat(app: &mut App, key: KeyEvent) {
-    // Ctrl+S saves the conversation.
-    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        app.open_save();
+    // Ctrl-combos: save, and conversation-tab management.
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('s') => app.open_save(),
+            KeyCode::Char('t') => app.new_tab(),
+            KeyCode::Char('w') => app.close_tab(),
+            _ => {}
+        }
         return;
     }
     match key.code {
+        // Tab / Shift-Tab flip between open conversations.
+        KeyCode::Tab => app.next_tab(),
+        KeyCode::BackTab => app.prev_tab(),
         KeyCode::Esc => {
             app.status.clear();
             app.screen = Screen::ModelSelect;

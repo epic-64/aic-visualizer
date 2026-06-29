@@ -12,6 +12,9 @@ pub struct ParsedTurn {
     pub input: u64,
     /// Output / response tokens this turn.
     pub output: u64,
+    /// Thinking / reasoning tokens this turn. Billed at the output rate, but
+    /// they don't carry into the next turn's context (unlike `output`).
+    pub thinking: u64,
     /// Explicit cached-token override. When `None`, the conversation's
     /// carried-over cache is used instead.
     pub cached_override: Option<u64>,
@@ -41,11 +44,13 @@ fn parse_number(token: &str) -> Option<u64> {
 enum Kind {
     Input,
     Output,
+    Thinking,
     Cached,
 }
 
 /// Classify a segment by the keywords it contains.
 ///
+/// Thinking: think / thinking / reason / reasoning
 /// Output: out / output / response / completion / answer
 /// Cached: anything containing "cach"
 /// Input (the default): in / input / prompt / tools / instructions / ...
@@ -53,6 +58,8 @@ fn classify(segment: &str) -> Kind {
     let s = segment.to_lowercase();
     if s.contains("cach") {
         Kind::Cached
+    } else if s.contains("think") || s.contains("reason") {
+        Kind::Thinking
     } else if s.contains("out") || s.contains("response") || s.contains("completion") || s.contains("answer") {
         Kind::Output
     } else {
@@ -95,6 +102,7 @@ pub fn parse(line: &str) -> Option<ParsedTurn> {
         match classify(segment) {
             Kind::Input => out.input += n,
             Kind::Output => out.output += n,
+            Kind::Thinking => out.thinking += n,
             Kind::Cached => out.cached_override = Some(out.cached_override.unwrap_or(0) + n),
         }
     }
@@ -148,6 +156,19 @@ mod tests {
     #[test]
     fn default_repeat_is_one() {
         assert_eq!(parse("100 in, 200 out").unwrap().repeat, 1);
+    }
+
+    #[test]
+    fn thinking_tokens() {
+        let p = parse("300 prompt, 2000 thinking, 400 out").unwrap();
+        assert_eq!(p.input, 300);
+        assert_eq!(p.thinking, 2_000);
+        assert_eq!(p.output, 400);
+
+        // "reasoning" is a synonym and shouldn't fall through to output.
+        let p = parse("500 reasoning, 1000 response").unwrap();
+        assert_eq!(p.thinking, 500);
+        assert_eq!(p.output, 1_000);
     }
 
     #[test]

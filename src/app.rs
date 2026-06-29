@@ -11,7 +11,67 @@ pub struct Turn {
     pub cached: u64,
     pub input: u64,
     pub output: u64,
+    /// Thinking / reasoning tokens, billed at the output rate. They do not
+    /// carry into the next turn's context window.
+    pub thinking: u64,
     pub cost: f64,
+}
+
+/// A positional marker dropped into the conversation. `after` is the number
+/// of turns that preceded it (so it sits between turn `after` and `after+1`);
+/// `label` is optional free text shown alongside it.
+#[derive(Clone)]
+pub struct Marker {
+    pub after: usize,
+    pub label: String,
+}
+
+/// If `input` is a `marker` command, return its (possibly empty) label.
+/// Accepts `marker`, `marker some text`, and `marker: some text`.
+pub fn marker_label(input: &str) -> Option<String> {
+    let t = input.trim();
+    if t.eq_ignore_ascii_case("marker") {
+        return Some(String::new());
+    }
+    let lower = t.to_lowercase();
+    for prefix in ["marker:", "marker "] {
+        if lower.starts_with(prefix) {
+            return Some(t[prefix.len()..].trim().to_string());
+        }
+    }
+    None
+}
+
+/// The raw line that persists a marker with the given label.
+fn marker_raw(label: &str) -> String {
+    if label.is_empty() {
+        "marker".to_string()
+    } else {
+        format!("marker: {label}")
+    }
+}
+
+/// An open conversation tab. Holds everything that distinguishes one
+/// conversation from another. The *active* tab's data lives in the App's
+/// "live" fields (turns, input, …); this struct is where an inactive tab's
+/// state is stashed, and is swapped back into the live fields on switch.
+#[derive(Clone, Default)]
+pub struct Tab {
+    pub active_model: Option<usize>,
+    pub turns: Vec<Turn>,
+    pub carried_cached: u64,
+    pub input: String,
+    pub status: String,
+    pub history_pos: Option<usize>,
+    pub scroll_up: u16,
+    /// Positional markers the user dropped into this conversation.
+    pub markers: Vec<Marker>,
+}
+
+/// A one-line summary of a tab for the tab bar.
+pub struct TabSummary {
+    pub label: String,
+    pub active: bool,
 }
 
 /// Which view is currently on screen.
@@ -41,7 +101,9 @@ impl StartItem {
                 format!("Example: {name}  ({} turns)", turns.len())
             }
             StartItem::Saved { name, model, turns } => {
-                format!("Saved: {name}  — {} ({} turns)", model.name, turns.len())
+                // Markers are saved as turn lines too; don't count them.
+                let n = turns.iter().filter(|t| marker_label(t).is_none()).count();
+                format!("Saved: {name}  — {} ({} turns)", model.name, n)
             }
         }
     }
@@ -122,6 +184,22 @@ pub struct App {
     // Input-history cursor (Up/Down to recall previous turns).
     pub history_pos: Option<usize>,
 
+    // How many lines the turn history is scrolled up from the bottom. 0 sticks
+    // to the newest turn; mouse-wheel up increases it to reveal older turns.
+    pub scroll_up: u16,
+
+    // Positional markers in the active conversation (see `Tab::markers`).
+    pub markers: Vec<Marker>,
+
+    // Max history scroll offset from the last render, so the scroll handlers
+    // can clamp correctly against the real (marker-inclusive) line count.
+    pub history_max_scroll: std::cell::Cell<u16>,
+
+    // Open conversation tabs. The active tab's data lives in the fields above;
+    // the others are stashed here. `active_tab` indexes into `tabs`.
+    pub tabs: Vec<Tab>,
+    pub active_tab: usize,
+
     pub should_quit: bool,
 }
 
@@ -142,6 +220,11 @@ impl App {
             start_selected: 0,
             save_name: String::new(),
             history_pos: None,
+            scroll_up: 0,
+            markers: Vec::new(),
+            history_max_scroll: std::cell::Cell::new(0),
+            tabs: vec![Tab::default()],
+            active_tab: 0,
             should_quit: false,
         }
     }
@@ -154,9 +237,9 @@ impl App {
         self.turns.iter().map(|t| t.cost).sum()
     }
 
-    pub fn total_tokens(&self) -> (u64, u64, u64) {
-        self.turns.iter().fold((0, 0, 0), |(c, i, o), t| {
-            (c + t.cached, i + t.input, o + t.output)
+    pub fn total_tokens(&self) -> (u64, u64, u64, u64) {
+        self.turns.iter().fold((0, 0, 0, 0), |(c, i, o, th), t| {
+            (c + t.cached, i + t.input, o + t.output, th + t.thinking)
         })
     }
 
@@ -306,18 +389,26 @@ impl App {
         self.carried_cached = 0;
         self.input.clear();
         self.history_pos = None;
+        self.scroll_up = 0;
+        self.markers.clear();
     }
 
     /// Apply a raw turn description: parse it, bill it, and append it.
     /// Returns false if the line had no recognizable token counts.
     fn apply_turn(&mut self, raw: String) -> bool {
-        let Some(model) = self.model().cloned() else {
-            return false;
-        };
         let raw = raw.trim().to_string();
         if raw.is_empty() {
             return false;
         }
+        // A marker is a positional annotation, not a billed turn. Recording it
+        // here lets a replayed (loaded) conversation restore its markers too.
+        if let Some(label) = marker_label(&raw) {
+            self.markers.push(Marker { after: self.turns.len(), label });
+            return true;
+        }
+        let Some(model) = self.model().cloned() else {
+            return false;
+        };
         let Some(parsed) = parser::parse(&raw) else {
             return false;
         };
@@ -335,18 +426,22 @@ impl App {
                 Some(c) if i == 0 => c,
                 _ => self.carried_cached,
             };
-            let cost = model.cost(cached, parsed.input, parsed.output);
+            // Thinking tokens are billed like output, so they add to the cost
+            // at the output rate.
+            let cost = model.cost(cached, parsed.input, parsed.output + parsed.thinking);
 
             self.turns.push(Turn {
                 raw: stored_raw.clone(),
                 cached,
                 input: parsed.input,
                 output: parsed.output,
+                thinking: parsed.thinking,
                 cost,
             });
 
             // Everything this turn (prompt + tool inputs + outputs) plus what
             // was already cached now becomes cached input for the next turn.
+            // Thinking tokens are excluded — they don't enter the context.
             self.carried_cached = cached + parsed.input + parsed.output;
         }
         true
@@ -364,6 +459,20 @@ impl App {
             self.status = "Conversation cleared.".into();
             return;
         }
+        // `marker` (optionally `marker: text`) drops a marker at the current
+        // point in the conversation. It isn't a turn and isn't billed.
+        if let Some(label) = marker_label(trimmed) {
+            let after = self.turns.len();
+            self.markers.push(Marker { after, label: label.clone() });
+            self.input.clear();
+            self.history_pos = None;
+            self.status = if label.is_empty() {
+                format!("Marker placed after turn {after}.")
+            } else {
+                format!("Marker '{label}' placed after turn {after}.")
+            };
+            return;
+        }
         let before = self.turns.len();
         let raw = self.input.clone();
         if !self.apply_turn(raw) {
@@ -373,6 +482,8 @@ impl App {
         let added = self.turns.len() - before;
         self.input.clear();
         self.history_pos = None;
+        // Jump back to the newest turn after sending.
+        self.scroll_up = 0;
         if added > 1 {
             self.status = format!(
                 "Added {added} turns. {} tokens now cached.",
@@ -397,6 +508,26 @@ impl App {
         self.screen = Screen::Chat;
     }
 
+    /// The conversation as a flat list of raw lines for saving: each turn's
+    /// raw text with `marker` lines woven in at their recorded positions. A
+    /// marker placed after `k` turns lands between turn `k` and turn `k+1`.
+    pub fn history_raws(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let emit_markers = |out: &mut Vec<String>, pos: usize| {
+            for m in &self.markers {
+                if m.after == pos {
+                    out.push(marker_raw(&m.label));
+                }
+            }
+        };
+        for (i, t) in self.turns.iter().enumerate() {
+            emit_markers(&mut out, i);
+            out.push(t.raw.clone());
+        }
+        emit_markers(&mut out, self.turns.len());
+        out
+    }
+
     // --- Saving ----------------------------------------------------------
 
     /// Open the "save as" prompt (no-op if there's nothing to save).
@@ -417,7 +548,7 @@ impl App {
         let Some(model) = self.model().cloned() else {
             return;
         };
-        let raws: Vec<String> = self.turns.iter().map(|t| t.raw.clone()).collect();
+        let raws = self.history_raws();
         match storage::save(self.save_name.trim(), &model, &raws) {
             Ok(path) => {
                 self.status = format!("Saved to {}", path.display());
@@ -463,5 +594,168 @@ impl App {
     /// Called when the user edits the input directly — drop the history cursor.
     pub fn on_input_edit(&mut self) {
         self.history_pos = None;
+    }
+
+    // --- Scrolling the turn history -------------------------------------
+
+    /// Scroll the turn history up toward older turns (mouse wheel up).
+    pub fn scroll_history_up(&mut self) {
+        // Cap at the real scrollable distance from the last render, which
+        // accounts for marker lines and any wrapping.
+        let max = self.history_max_scroll.get();
+        self.scroll_up = (self.scroll_up + 1).min(max);
+    }
+
+    /// Scroll the turn history down toward newer turns (mouse wheel down).
+    pub fn scroll_history_down(&mut self) {
+        self.scroll_up = self.scroll_up.saturating_sub(1);
+    }
+
+    // --- Conversation tabs ----------------------------------------------
+
+    /// Copy the live conversation fields into the active tab's slot.
+    fn stash_active(&mut self) {
+        let t = &mut self.tabs[self.active_tab];
+        t.active_model = self.active_model;
+        t.turns = std::mem::take(&mut self.turns);
+        t.carried_cached = self.carried_cached;
+        t.input = std::mem::take(&mut self.input);
+        t.status = std::mem::take(&mut self.status);
+        t.history_pos = self.history_pos;
+        t.scroll_up = self.scroll_up;
+        t.markers = std::mem::take(&mut self.markers);
+    }
+
+    /// Load the active tab's stored state into the live conversation fields.
+    fn restore_into_live(&mut self) {
+        let t = self.tabs[self.active_tab].clone();
+        self.active_model = t.active_model;
+        self.turns = t.turns;
+        self.carried_cached = t.carried_cached;
+        self.input = t.input;
+        self.status = t.status;
+        self.history_pos = t.history_pos;
+        self.scroll_up = t.scroll_up;
+        self.markers = t.markers;
+    }
+
+    /// Switch the active tab to index `i`, stashing the current one first.
+    fn switch_to(&mut self, i: usize) {
+        if i == self.active_tab || i >= self.tabs.len() {
+            return;
+        }
+        self.stash_active();
+        self.active_tab = i;
+        self.restore_into_live();
+        self.screen = Screen::Chat;
+    }
+
+    /// Move to the next tab (wraps around). No-op with a single tab.
+    pub fn next_tab(&mut self) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        self.switch_to((self.active_tab + 1) % self.tabs.len());
+    }
+
+    /// Move to the previous tab (wraps around). No-op with a single tab.
+    pub fn prev_tab(&mut self) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        let i = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+        self.switch_to(i);
+    }
+
+    /// Open a fresh tab and route to model selection to set it up.
+    pub fn new_tab(&mut self) {
+        self.stash_active();
+        self.tabs.push(Tab::default());
+        self.active_tab = self.tabs.len() - 1;
+        // Start the new tab from a clean slate.
+        self.active_model = None;
+        self.turns.clear();
+        self.carried_cached = 0;
+        self.input.clear();
+        self.status.clear();
+        self.history_pos = None;
+        self.scroll_up = 0;
+        self.markers.clear();
+        self.screen = Screen::ModelSelect;
+    }
+
+    /// Close the active tab and activate a neighbour. Keeps the last tab.
+    pub fn close_tab(&mut self) {
+        if self.tabs.len() <= 1 {
+            self.status = "Can't close the last tab.".into();
+            return;
+        }
+        self.tabs.remove(self.active_tab);
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        }
+        self.restore_into_live();
+        self.screen = Screen::Chat;
+    }
+
+    /// The turns belonging to tab `i`. The active tab's data lives in the
+    /// live `turns` field rather than its `tabs` slot, so it's special-cased.
+    pub fn tab_turns(&self, i: usize) -> &[Turn] {
+        if i == self.active_tab {
+            &self.turns
+        } else {
+            &self.tabs[i].turns
+        }
+    }
+
+    /// The model selected for tab `i` (active tab reads the live field).
+    pub fn tab_model(&self, i: usize) -> Option<&Model> {
+        let idx = if i == self.active_tab {
+            self.active_model
+        } else {
+            self.tabs[i].active_model
+        };
+        idx.and_then(|m| self.models.get(m))
+    }
+
+    /// The largest cumulative (total) cost of any open tab. The cost charts
+    /// use this to give every tab a shared y-scale, so switching tabs compares
+    /// like with like instead of each tab rescaling to its own max.
+    pub fn max_total_cost_across_tabs(&self) -> f64 {
+        (0..self.tabs.len())
+            .map(|i| self.tab_turns(i).iter().map(|t| t.cost).sum::<f64>())
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// The largest single-turn cost of any open tab, for a shared per-turn
+    /// chart y-scale across tabs.
+    pub fn max_turn_cost_across_tabs(&self) -> f64 {
+        (0..self.tabs.len())
+            .flat_map(|i| self.tab_turns(i).iter().map(|t| t.cost))
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// One-line summary per open tab, for the tab bar.
+    pub fn tab_summaries(&self) -> Vec<TabSummary> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(i, tab)| {
+                let active = i == self.active_tab;
+                // The active tab's data lives in the App fields, not in `tab`.
+                let (turns, model_idx): (&Vec<Turn>, Option<usize>) = if active {
+                    (&self.turns, self.active_model)
+                } else {
+                    (&tab.turns, tab.active_model)
+                };
+                let model_name = model_idx
+                    .and_then(|m| self.models.get(m))
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("—");
+                let cost: f64 = turns.iter().map(|t| t.cost).sum();
+                let label = format!("{}:{} ({}·${:.3})", i + 1, model_name, turns.len(), cost);
+                TabSummary { label, active }
+            })
+            .collect()
     }
 }

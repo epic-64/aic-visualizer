@@ -1,7 +1,7 @@
 //! Rendering for every screen.
 
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     symbols::Marker,
     text::{Line, Span},
@@ -217,6 +217,7 @@ fn chat(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1), // tab bar
             Constraint::Length(1), // title
             Constraint::Length(3), // summary
             Constraint::Length(3), // context gauge
@@ -226,23 +227,25 @@ fn chat(f: &mut Frame, app: &App) {
         ])
         .split(columns[0]);
 
+    tab_bar(f, app, chunks[0]);
+
     let model = app.model();
     let subtitle = model.map(|m| m.name.as_str()).unwrap_or("");
-    title_bar(f, chunks[0], subtitle);
+    title_bar(f, chunks[1], subtitle);
 
     // Summary line: totals.
-    let (tc, ti, to) = app.total_tokens();
+    let (tc, ti, to, tt) = app.total_tokens();
     let summary = Line::from(vec![
         Span::styled("Total: ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(format!("${:.4}", app.total_cost()), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
         Span::raw("   "),
-        Span::styled(format!("cached {tc}  input {ti}  output {to}"), Style::default().fg(Color::Gray)),
+        Span::styled(format!("cached {tc}  input {ti}  output {to}  thinking {tt}"), Style::default().fg(Color::Gray)),
         Span::raw("   "),
         Span::styled(format!("next turn cache: {} tok", app.carried_cached), Style::default().fg(Color::Yellow)),
     ]);
     f.render_widget(
         Paragraph::new(summary).block(Block::default().borders(Borders::ALL).title(" Conversation ")),
-        chunks[1],
+        chunks[2],
     );
 
     // Context-window usage gauge.
@@ -262,26 +265,45 @@ fn chat(f: &mut Frame, app: &App) {
         .gauge_style(Style::default().fg(gauge_color))
         .ratio(ratio)
         .label(format!("{} / {} tokens  ({:.1}%)", fmt_int(used), fmt_int(max), pct));
-    f.render_widget(gauge, chunks[2]);
+    f.render_widget(gauge, chunks[3]);
 
-    // History — most recent turns, newest at the bottom.
+    // History — most recent turns, newest at the bottom. Markers are woven
+    // in at their recorded positions as un-numbered separator lines.
     let mut lines: Vec<Line> = Vec::new();
+    let push_markers = |lines: &mut Vec<Line>, pos: usize| {
+        for m in &app.markers {
+            if m.after == pos {
+                let text = if m.label.is_empty() {
+                    "──────── marker ────────".to_string()
+                } else {
+                    format!("──────── marker · {} ────────", m.label)
+                };
+                lines.push(Line::from(Span::styled(
+                    text,
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                )));
+            }
+        }
+    };
     for (i, t) in app.turns.iter().enumerate() {
+        push_markers(&mut lines, i);
         lines.push(Line::from(vec![
             Span::styled(format!("#{} ", i + 1), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
             Span::raw(t.raw.clone()),
         ]));
         // Per-component cost (dimmed, in parens) using the active model's rates.
-        let (cached_cost, input_cost, output_cost) = match model {
+        // Thinking tokens bill at the output rate.
+        let (cached_cost, input_cost, output_cost, thinking_cost) = match model {
             Some(m) => (
                 t.cached as f64 / 1e6 * m.cached_per_m,
                 t.input as f64 / 1e6 * m.input_per_m,
                 t.output as f64 / 1e6 * m.output_per_m,
+                t.thinking as f64 / 1e6 * m.output_per_m,
             ),
-            None => (0.0, 0.0, 0.0),
+            None => (0.0, 0.0, 0.0, 0.0),
         };
         let dim = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
-        lines.push(Line::from(vec![
+        let mut detail = vec![
             Span::styled("    cached ", Style::default().fg(Color::DarkGray)),
             Span::raw(t.cached.to_string()),
             Span::styled(format!(" (${cached_cost:.4})"), dim),
@@ -291,24 +313,40 @@ fn chat(f: &mut Frame, app: &App) {
             Span::styled("  output ", Style::default().fg(Color::DarkGray)),
             Span::raw(t.output.to_string()),
             Span::styled(format!(" (${output_cost:.4})"), dim),
-            Span::styled("   → ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("${:.4}", t.cost), Style::default().fg(Color::Green)),
-        ]));
+        ];
+        // Only show the thinking component when there is any.
+        if t.thinking > 0 {
+            detail.push(Span::styled("  thinking ", Style::default().fg(Color::DarkGray)));
+            detail.push(Span::raw(t.thinking.to_string()));
+            detail.push(Span::styled(format!(" (${thinking_cost:.4})"), dim));
+        }
+        detail.push(Span::styled("   → ", Style::default().fg(Color::DarkGray)));
+        detail.push(Span::styled(format!("${:.4}", t.cost), Style::default().fg(Color::Green)));
+        lines.push(Line::from(detail));
     }
+    // Markers placed after the most recent turn.
+    push_markers(&mut lines, app.turns.len());
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             "No turns yet. Try: 300 tokens prompt, 12000 tokens tool inputs, 4000 tokens response",
             Style::default().fg(Color::DarkGray),
         )));
     }
-    // Keep the latest content visible by scrolling to the bottom.
-    let inner_height = chunks[3].height.saturating_sub(2) as usize;
-    let scroll = lines.len().saturating_sub(inner_height) as u16;
+    // Default to keeping the latest content visible (scrolled to the bottom);
+    // the user's mouse-wheel offset pulls the view back up toward older turns.
+    let inner_height = chunks[4].height.saturating_sub(2) as usize;
+    let bottom = lines.len().saturating_sub(inner_height) as u16;
+    // Record the real scrollable distance so the scroll handlers can clamp
+    // against it (markers and wrapping make turns*2 the wrong cap).
+    app.history_max_scroll.set(bottom);
+    let scroll = bottom.saturating_sub(app.scroll_up.min(bottom));
+    let scrolled = scroll < bottom;
+    let title = if scrolled { " Turns (scrolled — wheel down for newer) " } else { " Turns " };
     let history = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0))
-        .block(Block::default().borders(Borders::ALL).title(" Turns "));
-    f.render_widget(history, chunks[3]);
+        .block(Block::default().borders(Borders::ALL).title(title));
+    f.render_widget(history, chunks[4]);
 
     // Input box.
     let input = Paragraph::new(Line::from(vec![
@@ -322,17 +360,39 @@ fn chat(f: &mut Frame, app: &App) {
             .title(" Describe this turn ")
             .border_style(Style::default().fg(ACCENT)),
     );
-    f.render_widget(input, chunks[4]);
+    f.render_widget(input, chunks[5]);
 
     let help = Line::from(vec![
         key("Enter"), Span::raw(" send  "),
         key("↑/↓"), Span::raw(" recall  "),
+        key("Tab"), Span::raw(" switch tab  "),
+        key("Ctrl+T"), Span::raw(" new  "),
+        key("Ctrl+W"), Span::raw(" close  "),
         key("Ctrl+S"), Span::raw(" save  "),
+        key("marker [text]"), Span::raw(" mark  "),
         key("Esc"), Span::raw(" models  "),
-        key("Ctrl+C"), Span::raw(" quit  "),
         Span::styled(format!("  {}", app.status), Style::default().fg(Color::Yellow)),
     ]);
-    f.render_widget(Paragraph::new(help), chunks[5]);
+    f.render_widget(Paragraph::new(help), chunks[6]);
+}
+
+/// The tab strip across the top of the chat view: one chip per open
+/// conversation, the active one highlighted.
+fn tab_bar(f: &mut Frame, app: &App, area: Rect) {
+    let mut spans: Vec<Span> = vec![Span::styled(
+        " Tabs: ",
+        Style::default().fg(Color::DarkGray),
+    )];
+    for t in app.tab_summaries() {
+        let style = if t.active {
+            Style::default().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        spans.push(Span::styled(format!(" {} ", t.label), style));
+        spans.push(Span::raw(" "));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Right-hand panel: two stacked charts — total (cumulative) cost on top,
@@ -355,54 +415,133 @@ fn cost_graph(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Build the series, indexed by turn number on the x-axis. For the
-    // per-turn chart we also track how much of each bar was cache cost.
-    let model = app.model();
-    let mut per_turn: Vec<(f64, f64)> = Vec::new();
-    let mut per_turn_cache: Vec<(f64, f64)> = Vec::new();
-    let mut cumulative: Vec<(f64, f64)> = Vec::new();
-    let mut running = 0.0;
-    for (i, t) in app.turns.iter().enumerate() {
-        let x = (i + 1) as f64;
-        let cache_cost = model
-            .map(|m| t.cached as f64 / 1e6 * m.cached_per_m)
-            .unwrap_or(0.0);
-        per_turn.push((x, t.cost));
-        per_turn_cache.push((x, cache_cost));
-        running += t.cost;
-        cumulative.push((x, running));
+    // Build a series set per open tab, indexed by turn number on the x-axis.
+    // Every tab is plotted at once so conversations can be compared directly;
+    // the active tab is drawn bright and on top, the rest dimmed underneath.
+    // For the per-turn chart we also track each bar's cache-cost portion.
+    let mut charts: Vec<TabChart> = Vec::with_capacity(app.tabs.len());
+    for i in 0..app.tabs.len() {
+        let model = app.tab_model(i);
+        let mut per_turn: Vec<(f64, f64)> = Vec::new();
+        let mut per_turn_cache: Vec<(f64, f64)> = Vec::new();
+        let mut cumulative: Vec<(f64, f64)> = Vec::new();
+        let mut running = 0.0;
+        for (j, t) in app.tab_turns(i).iter().enumerate() {
+            let x = (j + 1) as f64;
+            let cache_cost = model
+                .map(|m| t.cached as f64 / 1e6 * m.cached_per_m)
+                .unwrap_or(0.0);
+            per_turn.push((x, t.cost));
+            per_turn_cache.push((x, cache_cost));
+            running += t.cost;
+            cumulative.push((x, running));
+        }
+        charts.push(TabChart {
+            active: i == app.active_tab,
+            per_turn,
+            per_turn_cache,
+            cumulative,
+        });
     }
-    let n = app.turns.len() as f64;
-    let per_turn_max = per_turn.iter().map(|p| p.1).fold(0.0_f64, f64::max);
+
+    // X-axis spans the longest conversation; y-axes use the cross-tab maxima
+    // so every overlaid series shares a comparable scale.
+    let n = charts.iter().map(|c| c.cumulative.len()).max().unwrap_or(0) as f64;
+    let total_max = app.max_total_cost_across_tabs();
+    let per_turn_y_max = app.max_turn_cost_across_tabs();
+
+    // Style for the dimmed underlay series (the non-active tabs).
+    let dim = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
+
+    // Total chart overlays every tab (dim-first so the active one draws on
+    // top). The per-turn chart shows only the active tab — overlaying every
+    // tab's bars there made it too noisy to read.
+    let mut total_series: Vec<Series> = Vec::new();
+    let mut turn_series: Vec<Series> = Vec::new();
+    for c in charts.iter().filter(|c| !c.active) {
+        total_series.push(("", dim, GraphType::Line, &c.cumulative));
+    }
+    for c in charts.iter().filter(|c| c.active) {
+        total_series.push((
+            "total",
+            Style::default().fg(Color::Green),
+            GraphType::Line,
+            &c.cumulative,
+        ));
+        turn_series.push((
+            "turn",
+            Style::default().fg(Color::Cyan),
+            GraphType::Bar,
+            &c.per_turn,
+        ));
+        turn_series.push((
+            "cache",
+            Style::default().fg(Color::Magenta),
+            GraphType::Bar,
+            &c.per_turn_cache,
+        ));
+    }
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    // Top: cumulative total cost.
-    cost_chart(
-        f,
-        rows[0],
-        " Total cost ",
-        &[("total", Color::Green, GraphType::Line, &cumulative)],
-        n,
-        running,
-    );
+    // The active conversation's markers, placed between turns: a marker set
+    // after turn k sits at x = k + 0.5.
+    let marker_xs: Vec<f64> = app.markers.iter().map(|m| m.after as f64 + 0.5).collect();
+
+    // Markers split the active conversation into segments; label each segment
+    // (start→marker, marker→marker, marker→end) with its summed cost, centred
+    // over the segment. Skipped when there are no markers (one whole segment).
+    let mut seg_labels: Vec<(f64, String)> = Vec::new();
+    if !app.markers.is_empty() {
+        let turn_n = app.turns.len();
+        let mut bounds: Vec<usize> = vec![0, turn_n];
+        bounds.extend(app.markers.iter().map(|m| m.after.min(turn_n)));
+        bounds.sort_unstable();
+        bounds.dedup();
+        for w in bounds.windows(2) {
+            let (p, q) = (w[0], w[1]);
+            let cost: f64 = app.turns[p..q].iter().map(|t| t.cost).sum();
+            // Boundary p sits at data-x p + 0.5, so the segment's midpoint is
+            // ((p + 0.5) + (q + 0.5)) / 2.
+            let mid = (p as f64 + q as f64 + 1.0) / 2.0;
+            seg_labels.push((mid, format!("${cost:.4}")));
+        }
+    }
+
+    // Top: cumulative total cost. Braille gives a smooth line. The per-segment
+    // cost labels live here; the legend is dropped so they own the top row.
+    cost_chart(f, rows[0], " Total cost ", Marker::Braille, &total_series, n, total_max, &marker_xs, false, &seg_labels);
 
     // Bottom: per-turn cost. The full bar is the turn's total; the magenta
     // overlay (drawn on top, same baseline) shows the cache-cost portion.
+    // HalfBlock keeps the two bars cell-aligned so they meet without a gap.
     cost_chart(
         f,
         rows[1],
         " Cost per turn (magenta = cache) ",
-        &[
-            ("turn", Color::Cyan, GraphType::Bar, &per_turn),
-            ("cache", Color::Magenta, GraphType::Bar, &per_turn_cache),
-        ],
+        Marker::HalfBlock,
+        &turn_series,
         n,
-        per_turn_max,
+        per_turn_y_max,
+        &marker_xs,
+        true,
+        &[],
     );
+}
+
+/// A single plotted series: legend name, style, shape, and its data points.
+type Series<'a> = (&'a str, Style, GraphType, &'a [(f64, f64)]);
+
+/// One tab's computed cost series, ready to plot. `active` marks the tab the
+/// user is currently viewing (drawn bright; the others are dimmed underlays).
+struct TabChart {
+    active: bool,
+    per_turn: Vec<(f64, f64)>,
+    per_turn_cache: Vec<(f64, f64)>,
+    cumulative: Vec<(f64, f64)>,
 }
 
 /// Render a cost chart filling `area` with one or more overlaid series,
@@ -411,24 +550,46 @@ fn cost_chart(
     f: &mut Frame,
     area: Rect,
     title: &str,
-    series: &[(&str, Color, GraphType, &[(f64, f64)])],
+    marker: Marker,
+    series: &[Series],
     n: f64,
     data_max: f64,
+    marker_xs: &[f64],
+    show_legend: bool,
+    segment_labels: &[(f64, String)],
 ) {
     // Headroom so the top isn't flush against the border.
     let y_max = (data_max * 1.1).max(0.0001);
 
-    let datasets: Vec<Dataset> = series
+    // Each marker is a dim vertical line spanning the full height. Built up
+    // front so the points outlive the datasets that borrow them.
+    let marker_lines: Vec<[(f64, f64); 2]> =
+        marker_xs.iter().map(|&x| [(x, 0.0), (x, y_max)]).collect();
+    let marker_style = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
+
+    // Markers first so the cost series draw on top of them.
+    let mut datasets: Vec<Dataset> = marker_lines
         .iter()
-        .map(|(name, color, graph_type, data)| {
+        .map(|line| {
             Dataset::default()
-                .name(*name)
-                .marker(Marker::Braille)
-                .graph_type(*graph_type)
-                .style(Style::default().fg(*color))
-                .data(data)
+                .marker(marker)
+                .graph_type(GraphType::Line)
+                .style(marker_style)
+                .data(line)
         })
         .collect();
+    datasets.extend(series.iter().map(|(name, style, graph_type, data)| {
+        // Leave dimmed underlay series (empty name) out of the legend.
+        let mut ds = Dataset::default()
+            .marker(marker)
+            .graph_type(*graph_type)
+            .style(*style)
+            .data(data);
+        if !name.is_empty() {
+            ds = ds.name(*name);
+        }
+        ds
+    }));
 
     let x_axis = Axis::default()
         .style(Style::default().fg(Color::DarkGray))
@@ -453,8 +614,57 @@ fn cost_chart(
         )
         .x_axis(x_axis)
         .y_axis(y_axis)
-        .legend_position(Some(LegendPosition::TopLeft));
+        .legend_position(show_legend.then_some(LegendPosition::TopLeft));
     f.render_widget(chart, area);
+
+    draw_segment_labels(f, area, n, &y_label_widths(y_max), segment_labels);
+}
+
+/// The y-axis label strings cost_chart renders, so the segment-label placement
+/// can account for the left margin ratatui reserves for them.
+fn y_label_widths(y_max: f64) -> [u16; 3] {
+    [
+        "$0".len() as u16,
+        format!("${:.3}", y_max / 2.0).len() as u16,
+        format!("${:.3}", y_max).len() as u16,
+    ]
+}
+
+/// Draw segment cost labels along the top of a chart's plot area. We replicate
+/// ratatui's internal graph-area geometry (block border + y-axis label column)
+/// to map each label's data-x to a screen column.
+fn draw_segment_labels(
+    f: &mut Frame,
+    area: Rect,
+    n: f64,
+    y_label_widths: &[u16; 3],
+    segment_labels: &[(f64, String)],
+) {
+    if segment_labels.is_empty() || n <= 0.0 {
+        return;
+    }
+    let inner = area.inner(Margin::new(1, 1)); // inside the block border
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    // ratatui reserves the widest y label (capped at 1/3 width) plus one column
+    // for the y-axis line itself, to the left of the plot.
+    let y_label_w = (*y_label_widths.iter().max().unwrap()).min(inner.width / 3);
+    let graph_x = inner.left() + y_label_w + 1;
+    let graph_w = inner.right().saturating_sub(graph_x);
+    if graph_w == 0 {
+        return;
+    }
+    let style = Style::default().fg(Color::Gray).add_modifier(Modifier::DIM);
+    for (vx, text) in segment_labels {
+        // x-axis bounds are [0.5, n + 0.5]; map the midpoint into the plot.
+        let frac = ((vx - 0.5) / n).clamp(0.0, 1.0);
+        let center = graph_x as f64 + frac * graph_w.saturating_sub(1) as f64;
+        let w = text.chars().count() as u16;
+        let start = (center - w as f64 / 2.0).round().max(graph_x as f64) as u16;
+        let start = start.min(graph_x + graph_w.saturating_sub(w));
+        f.buffer_mut().set_stringn(start, inner.top(), text, graph_w as usize, style);
+    }
 }
 
 /// Format an integer with thousands separators, e.g. 1234567 -> "1,234,567".
