@@ -67,6 +67,9 @@ pub struct Tab {
     pub scroll_up: u16,
     /// Positional markers the user dropped into this conversation.
     pub markers: Vec<Marker>,
+    /// The saved-conversation name this tab was loaded from (or last saved as),
+    /// used to default the "save as" prompt so re-saving overrides the entry.
+    pub conv_name: Option<String>,
 }
 
 /// A one-line summary of a tab for the tab bar.
@@ -83,6 +86,8 @@ pub enum Screen {
     Start,
     Chat,
     SaveName,
+    /// Confirming deletion of the highlighted saved conversation.
+    ConfirmDelete,
 }
 
 /// An entry on the "Start" picker: a blank conversation, a built-in example,
@@ -91,7 +96,7 @@ pub enum Screen {
 pub enum StartItem {
     Blank,
     Example { name: String, turns: Vec<String> },
-    Saved { name: String, model: Model, turns: Vec<String> },
+    Saved { name: String, model: Model, turns: Vec<String>, path: std::path::PathBuf },
 }
 
 impl StartItem {
@@ -101,7 +106,7 @@ impl StartItem {
             StartItem::Example { name, turns } => {
                 format!("Example: {name}  ({} turns)", turns.len())
             }
-            StartItem::Saved { name, model, turns } => {
+            StartItem::Saved { name, model, turns, .. } => {
                 // Markers are saved as turn lines too; don't count them.
                 let n = turns.iter().filter(|t| marker_label(t).is_none()).count();
                 format!("Saved: {name}  — {} ({} turns)", model.name, n)
@@ -197,6 +202,9 @@ pub struct App {
     // Positional markers in the active conversation (see `Tab::markers`).
     pub markers: Vec<Marker>,
 
+    // Saved-conversation name backing the active tab (see `Tab::conv_name`).
+    pub conv_name: Option<String>,
+
     // Max history scroll offset from the last render, so the scroll handlers
     // can clamp correctly against the real (marker-inclusive) line count.
     pub history_max_scroll: std::cell::Cell<u16>,
@@ -229,6 +237,7 @@ impl App {
             history_pos: None,
             scroll_up: 0,
             markers: Vec::new(),
+            conv_name: None,
             history_max_scroll: std::cell::Cell::new(0),
             tabs: vec![Tab::default()],
             active_tab: 0,
@@ -298,6 +307,7 @@ impl App {
                 name: c.name,
                 model: c.model,
                 turns: c.turns,
+                path: c.path,
             });
         }
         self.start_items = items;
@@ -306,6 +316,7 @@ impl App {
     }
 
     pub fn start_up(&mut self) {
+        self.status.clear();
         if self.start_selected == 0 {
             self.start_selected = self.start_items.len().saturating_sub(1);
         } else {
@@ -314,6 +325,7 @@ impl App {
     }
 
     pub fn start_down(&mut self) {
+        self.status.clear();
         if self.start_selected + 1 >= self.start_items.len() {
             self.start_selected = 0;
         } else {
@@ -333,7 +345,7 @@ impl App {
                 self.screen = Screen::Chat;
             }
             StartItem::Example { turns, .. } => self.load_turns(turns),
-            StartItem::Saved { model, turns, .. } => {
+            StartItem::Saved { name, model, turns, .. } => {
                 // Restore (and if needed register) the saved conversation's model.
                 let idx = self
                     .models
@@ -346,8 +358,59 @@ impl App {
                 self.active_model = Some(idx);
                 self.selected = idx;
                 self.load_turns(turns);
+                // load_turns resets state, so record the source name afterwards
+                // — it defaults the save prompt so re-saving overrides this file.
+                self.conv_name = Some(name);
             }
         }
+    }
+
+    /// The highlighted start item's name if it is a deletable saved
+    /// conversation, for the confirmation prompt.
+    pub fn selected_saved_name(&self) -> Option<&str> {
+        match self.start_items.get(self.start_selected) {
+            Some(StartItem::Saved { name, .. }) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Ask to delete the highlighted start item: open the confirmation modal if
+    /// it's a saved conversation, otherwise explain why it can't be deleted.
+    pub fn request_delete(&mut self) {
+        if self.selected_saved_name().is_some() {
+            self.screen = Screen::ConfirmDelete;
+        } else {
+            self.status = "Only saved conversations can be deleted.".into();
+        }
+    }
+
+    /// Confirm the pending deletion: remove the highlighted saved conversation
+    /// from disk, rebuild the list (keeping the selection in range), and return
+    /// to the Start picker.
+    pub fn confirm_delete(&mut self) {
+        let Some(StartItem::Saved { name, path, .. }) = self.start_items.get(self.start_selected)
+        else {
+            self.screen = Screen::Start;
+            return;
+        };
+        let (name, path) = (name.clone(), path.clone());
+        match storage::delete(&path) {
+            Ok(()) => {
+                let prev = self.start_selected;
+                self.open_start();
+                self.start_selected = prev.min(self.start_items.len().saturating_sub(1));
+                self.status = format!("Deleted saved conversation '{name}'.");
+            }
+            Err(e) => {
+                self.status = format!("Delete failed: {e}");
+                self.screen = Screen::Start;
+            }
+        }
+    }
+
+    /// Dismiss the deletion modal without deleting.
+    pub fn cancel_delete(&mut self) {
+        self.screen = Screen::Start;
     }
 
     // --- Custom model form ----------------------------------------------
@@ -399,6 +462,7 @@ impl App {
         self.history_pos = None;
         self.scroll_up = 0;
         self.markers.clear();
+        self.conv_name = None;
     }
 
     /// Apply a raw turn description: parse it, bill it, and append it.
@@ -557,10 +621,13 @@ impl App {
             self.status = "Nothing to save yet.".into();
             return;
         }
-        self.save_name = self
-            .model()
-            .map(|m| format!("{} conversation", m.name))
-            .unwrap_or_else(|| "conversation".into());
+        // Default to the name this conversation was loaded from (so pressing
+        // Enter overrides that entry); otherwise suggest one from the model.
+        self.save_name = self.conv_name.clone().unwrap_or_else(|| {
+            self.model()
+                .map(|m| format!("{} conversation", m.name))
+                .unwrap_or_else(|| "conversation".into())
+        });
         self.screen = Screen::SaveName;
     }
 
@@ -570,8 +637,11 @@ impl App {
             return;
         };
         let raws = self.history_raws();
-        match storage::save(self.save_name.trim(), &model, &raws) {
+        let name = self.save_name.trim().to_string();
+        match storage::save(&name, &model, &raws) {
             Ok(path) => {
+                // Remember the name so a later save defaults to overriding it.
+                self.conv_name = Some(name);
                 self.status = format!("Saved to {}", path.display());
             }
             Err(e) => {
@@ -648,6 +718,7 @@ impl App {
         t.history_pos = self.history_pos;
         t.scroll_up = self.scroll_up;
         t.markers = std::mem::take(&mut self.markers);
+        t.conv_name = self.conv_name.take();
     }
 
     /// Load the active tab's stored state into the live conversation fields.
@@ -662,6 +733,7 @@ impl App {
         self.history_pos = t.history_pos;
         self.scroll_up = t.scroll_up;
         self.markers = t.markers;
+        self.conv_name = t.conv_name;
     }
 
     /// Switch the active tab to index `i`, stashing the current one first.
@@ -706,6 +778,7 @@ impl App {
         self.history_pos = None;
         self.scroll_up = 0;
         self.markers.clear();
+        self.conv_name = None;
         self.screen = Screen::ModelSelect;
     }
 

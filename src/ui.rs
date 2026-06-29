@@ -26,6 +26,10 @@ pub fn render(f: &mut Frame, app: &App) {
             chat(f, app);
             save_name(f, app);
         }
+        Screen::ConfirmDelete => {
+            start(f, app);
+            confirm_delete(f, app);
+        }
     }
 }
 
@@ -127,21 +131,58 @@ fn start(f: &mut Frame, app: &App) {
     );
     f.render_widget(list, chunks[1]);
 
-    let help = Line::from(vec![
-        key("↑/↓"), Span::raw(" move  "),
-        key("Enter"), Span::raw(" start  "),
-        key("Esc"), Span::raw(" back to models"),
-    ]);
-    f.render_widget(Paragraph::new(help), chunks[2]);
+    // Show feedback (e.g. a deletion result) when present, otherwise the keys.
+    let footer = if app.status.is_empty() {
+        Line::from(vec![
+            key("↑/↓"), Span::raw(" move  "),
+            key("Enter"), Span::raw(" start  "),
+            key("d"), Span::raw(" delete saved  "),
+            key("Esc"), Span::raw(" back to models"),
+        ])
+    } else {
+        Line::from(Span::styled(app.status.clone(), Style::default().fg(ACCENT)))
+    };
+    f.render_widget(Paragraph::new(footer), chunks[2]);
+}
+
+fn confirm_delete(f: &mut Frame, app: &App) {
+    let name = app.selected_saved_name().unwrap_or("");
+    let area = centered(f.area(), 60, 5);
+    f.render_widget(ratatui::widgets::Clear, area);
+    let body = Paragraph::new(vec![
+        Line::from(vec![
+            Span::raw("Delete saved conversation "),
+            Span::styled(format!("'{name}'"), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::raw("?"),
+        ]),
+        Line::from(Span::styled("This removes the file from disk.", Style::default().fg(Color::DarkGray))),
+        Line::from(vec![
+            key("y"), Span::raw(" delete   "),
+            key("n"), Span::raw(" cancel"),
+        ]),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Confirm delete ")
+            .border_style(Style::default().fg(Color::Red)),
+    );
+    f.render_widget(body, area);
 }
 
 fn save_name(f: &mut Frame, app: &App) {
-    let area = centered(f.area(), 60, 3);
+    let area = centered(f.area(), 60, 4);
     f.render_widget(ratatui::widgets::Clear, area);
-    let input = Paragraph::new(Line::from(vec![
-        Span::raw(&app.save_name),
-        Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
-    ]))
+    let input = Paragraph::new(vec![
+        Line::from(vec![
+            Span::raw(&app.save_name),
+            Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
+        ]),
+        Line::from(Span::styled(
+            "An existing name overrides that saved conversation.",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ])
     .block(
         Block::default()
             .borders(Borders::ALL)

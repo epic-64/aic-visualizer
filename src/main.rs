@@ -67,6 +67,7 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) 
             Screen::Start => handle_start(app, key.code),
             Screen::Chat => handle_chat(app, key),
             Screen::SaveName => handle_save_name(app, key.code),
+            Screen::ConfirmDelete => handle_confirm_delete(app, key.code),
         }
 
         if app.should_quit {
@@ -92,6 +93,15 @@ fn handle_start(app: &mut App, code: KeyCode) {
         KeyCode::Up | KeyCode::Char('k') => app.start_up(),
         KeyCode::Down | KeyCode::Char('j') => app.start_down(),
         KeyCode::Enter => app.start_choose(),
+        KeyCode::Char('d') | KeyCode::Delete => app.request_delete(),
+        _ => {}
+    }
+}
+
+fn handle_confirm_delete(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Char('y') | KeyCode::Enter => app.confirm_delete(),
+        KeyCode::Char('n') | KeyCode::Esc => app.cancel_delete(),
         _ => {}
     }
 }

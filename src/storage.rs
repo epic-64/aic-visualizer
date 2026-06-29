@@ -16,6 +16,10 @@ pub struct SavedConversation {
     pub name: String,
     pub model: Model,
     pub turns: Vec<String>,
+    /// The file this conversation was read from, for later deletion. The on-disk
+    /// filename is derived from a sanitized name, so it can't be reconstructed
+    /// reliably from `name` alone — we keep the real path instead.
+    pub path: PathBuf,
 }
 
 /// Directory where conversations live: `$HOME/.token-visualizer/conversations`.
@@ -55,6 +59,11 @@ pub fn save(name: &str, model: &Model, turns: &[String]) -> io::Result<PathBuf> 
     }
     fs::write(&path, s)?;
     Ok(path)
+}
+
+/// Delete a saved conversation file from disk.
+pub fn delete(path: &Path) -> io::Result<()> {
+    fs::remove_file(path)
 }
 
 /// List every saved conversation, sorted by name.
@@ -113,5 +122,6 @@ fn parse(content: &str, path: &Path) -> Option<SavedConversation> {
         name,
         model: Model::new(&model_name, input, output, cached, context),
         turns,
+        path: path.to_path_buf(),
     })
 }
