@@ -62,6 +62,7 @@ pub struct Tab {
     pub carried_cached: u64,
     pub input: String,
     pub status: String,
+    pub input_history: Vec<String>,
     pub history_pos: Option<usize>,
     pub scroll_up: u16,
     /// Positional markers the user dropped into this conversation.
@@ -170,6 +171,11 @@ pub struct App {
     pub input: String,
     pub status: String,
 
+    // Lines the user actually submitted, in order, for Up/Down recall. Unlike
+    // `turns`, this keeps the original typed line (e.g. a `repeat N` directive)
+    // and stores one entry per submission rather than per expanded turn.
+    pub input_history: Vec<String>,
+
     // Custom-model form state.
     pub form: [String; 5],
     pub form_field: usize,
@@ -214,6 +220,7 @@ impl App {
             carried_cached: 0,
             input: String::new(),
             status: String::new(),
+            input_history: Vec::new(),
             form: Default::default(),
             form_field: 0,
             start_items: Vec::new(),
@@ -388,6 +395,7 @@ impl App {
         self.turns.clear();
         self.carried_cached = 0;
         self.input.clear();
+        self.input_history.clear();
         self.history_pos = None;
         self.scroll_up = 0;
         self.markers.clear();
@@ -453,6 +461,13 @@ impl App {
         if trimmed.is_empty() {
             return;
         }
+        // Record the line as typed for Up/Down recall, before it's parsed,
+        // expanded, or cleared. Skip a run of identical lines so repeatedly
+        // submitting the same turn doesn't clutter the recall list.
+        let raw_input = trimmed.to_string();
+        if self.input_history.last() != Some(&raw_input) {
+            self.input_history.push(raw_input);
+        }
         // `clear` wipes the current conversation.
         if trimmed.eq_ignore_ascii_case("clear") {
             self.reset_conversation();
@@ -502,6 +517,12 @@ impl App {
     pub fn load_turns(&mut self, raws: Vec<String>) {
         self.reset_conversation();
         for raw in raws {
+            // Make loaded lines recallable with Up/Down, skipping consecutive
+            // duplicates as a live submission would.
+            let trimmed = raw.trim().to_string();
+            if !trimmed.is_empty() && self.input_history.last() != Some(&trimmed) {
+                self.input_history.push(trimmed);
+            }
             self.apply_turn(raw);
         }
         self.status = format!("Loaded {} turns. Continue typing to add more.", self.turns.len());
@@ -562,26 +583,28 @@ impl App {
 
     // --- Input history ---------------------------------------------------
 
-    /// Recall an older turn into the input box (Up arrow).
+    /// Recall an older submitted line into the input box (Up arrow). Cycles
+    /// over the lines as typed, so a `repeat N` directive is preserved and a
+    /// repeated turn is recalled once, not once per expanded turn.
     pub fn history_up(&mut self) {
-        if self.turns.is_empty() {
+        if self.input_history.is_empty() {
             return;
         }
         let pos = match self.history_pos {
-            None => self.turns.len() - 1,
+            None => self.input_history.len() - 1,
             Some(0) => 0,
             Some(p) => p - 1,
         };
         self.history_pos = Some(pos);
-        self.input = self.turns[pos].raw.clone();
+        self.input = self.input_history[pos].clone();
     }
 
-    /// Move toward more recent turns, clearing past the newest (Down arrow).
+    /// Move toward more recent lines, clearing past the newest (Down arrow).
     pub fn history_down(&mut self) {
         match self.history_pos {
-            Some(p) if p + 1 < self.turns.len() => {
+            Some(p) if p + 1 < self.input_history.len() => {
                 self.history_pos = Some(p + 1);
-                self.input = self.turns[p + 1].raw.clone();
+                self.input = self.input_history[p + 1].clone();
             }
             Some(_) => {
                 self.history_pos = None;
@@ -621,6 +644,7 @@ impl App {
         t.carried_cached = self.carried_cached;
         t.input = std::mem::take(&mut self.input);
         t.status = std::mem::take(&mut self.status);
+        t.input_history = std::mem::take(&mut self.input_history);
         t.history_pos = self.history_pos;
         t.scroll_up = self.scroll_up;
         t.markers = std::mem::take(&mut self.markers);
@@ -634,6 +658,7 @@ impl App {
         self.carried_cached = t.carried_cached;
         self.input = t.input;
         self.status = t.status;
+        self.input_history = t.input_history;
         self.history_pos = t.history_pos;
         self.scroll_up = t.scroll_up;
         self.markers = t.markers;
