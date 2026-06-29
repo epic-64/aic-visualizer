@@ -78,6 +78,20 @@ fn example_conversations() -> Vec<(String, Vec<String>)> {
     ]
 }
 
+/// Remove any `repeat N` / `N times` segments from a turn line, leaving a
+/// plain single-turn description. Used so an expanded repeat is stored (and
+/// later saved) as individual turns rather than re-multiplying on reload.
+fn strip_repeat(raw: &str) -> String {
+    raw.split([',', ';'])
+        .map(str::trim)
+        .filter(|seg| {
+            let l = seg.to_lowercase();
+            !seg.is_empty() && !l.contains("repeat") && !l.contains("times")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Fields in the custom-model form, in tab order.
 pub const FORM_FIELDS: [&str; 5] =
     ["Name", "Input $/M", "Output $/M", "Cached $/M", "Context (tok)"];
@@ -308,6 +322,10 @@ impl App {
             return false;
         };
 
+        // Store each expanded turn as a single-turn line (without the `repeat`
+        // directive) so saving/reloading doesn't re-multiply the repeats.
+        let stored_raw = strip_repeat(&raw);
+
         // Apply the turn `repeat` times; each repetition re-caches the
         // previous one, so the cost grows as context accumulates.
         for i in 0..parsed.repeat.max(1) {
@@ -320,7 +338,7 @@ impl App {
             let cost = model.cost(cached, parsed.input, parsed.output);
 
             self.turns.push(Turn {
-                raw: raw.clone(),
+                raw: stored_raw.clone(),
                 cached,
                 input: parsed.input,
                 output: parsed.output,
@@ -336,7 +354,14 @@ impl App {
 
     /// Submit the current input buffer as a turn.
     pub fn submit_turn(&mut self) {
-        if self.input.trim().is_empty() {
+        let trimmed = self.input.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        // `clear` wipes the current conversation.
+        if trimmed.eq_ignore_ascii_case("clear") {
+            self.reset_conversation();
+            self.status = "Conversation cleared.".into();
             return;
         }
         let before = self.turns.len();
