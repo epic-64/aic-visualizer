@@ -6,7 +6,8 @@ use ratatui::{
     symbols::Marker,
     text::{Line, Span},
     widgets::{
-        Axis, Block, Borders, Chart, Dataset, Gauge, GraphType, List, ListItem, Paragraph, Wrap,
+        Axis, Block, Borders, Chart, Dataset, Gauge, GraphType, LegendPosition, List, ListItem,
+        Paragraph, Wrap,
     },
     Frame,
 };
@@ -354,13 +355,20 @@ fn cost_graph(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Build the two series, indexed by turn number on the x-axis.
+    // Build the series, indexed by turn number on the x-axis. For the
+    // per-turn chart we also track how much of each bar was cache cost.
+    let model = app.model();
     let mut per_turn: Vec<(f64, f64)> = Vec::new();
+    let mut per_turn_cache: Vec<(f64, f64)> = Vec::new();
     let mut cumulative: Vec<(f64, f64)> = Vec::new();
     let mut running = 0.0;
     for (i, t) in app.turns.iter().enumerate() {
         let x = (i + 1) as f64;
+        let cache_cost = model
+            .map(|m| t.cached as f64 / 1e6 * m.cached_per_m)
+            .unwrap_or(0.0);
         per_turn.push((x, t.cost));
+        per_turn_cache.push((x, cache_cost));
         running += t.cost;
         cumulative.push((x, running));
     }
@@ -372,48 +380,55 @@ fn cost_graph(f: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    single_cost_chart(
+    // Top: cumulative total cost.
+    cost_chart(
         f,
         rows[0],
         " Total cost ",
-        Color::Green,
-        GraphType::Line,
-        &cumulative,
+        &[("total", Color::Green, GraphType::Line, &cumulative)],
         n,
         running,
     );
-    single_cost_chart(
+
+    // Bottom: per-turn cost. The full bar is the turn's total; the magenta
+    // overlay (drawn on top, same baseline) shows the cache-cost portion.
+    cost_chart(
         f,
         rows[1],
-        " Cost per turn ",
-        Color::Cyan,
-        GraphType::Bar,
-        &per_turn,
+        " Cost per turn (magenta = cache) ",
+        &[
+            ("turn", Color::Cyan, GraphType::Bar, &per_turn),
+            ("cache", Color::Magenta, GraphType::Bar, &per_turn_cache),
+        ],
         n,
         per_turn_max,
     );
 }
 
-/// Render one cost chart filling `area`, with its own y-scale.
-#[allow(clippy::too_many_arguments)]
-fn single_cost_chart(
+/// Render a cost chart filling `area` with one or more overlaid series,
+/// sharing a single y-scale derived from `data_max`.
+fn cost_chart(
     f: &mut Frame,
     area: Rect,
     title: &str,
-    color: Color,
-    graph_type: GraphType,
-    data: &[(f64, f64)],
+    series: &[(&str, Color, GraphType, &[(f64, f64)])],
     n: f64,
     data_max: f64,
 ) {
     // Headroom so the top isn't flush against the border.
     let y_max = (data_max * 1.1).max(0.0001);
 
-    let datasets = vec![Dataset::default()
-        .marker(Marker::Braille)
-        .graph_type(graph_type)
-        .style(Style::default().fg(color))
-        .data(data)];
+    let datasets: Vec<Dataset> = series
+        .iter()
+        .map(|(name, color, graph_type, data)| {
+            Dataset::default()
+                .name(*name)
+                .marker(Marker::Braille)
+                .graph_type(*graph_type)
+                .style(Style::default().fg(*color))
+                .data(data)
+        })
+        .collect();
 
     let x_axis = Axis::default()
         .style(Style::default().fg(Color::DarkGray))
@@ -437,7 +452,8 @@ fn single_cost_chart(
                 .border_style(Style::default().fg(ACCENT)),
         )
         .x_axis(x_axis)
-        .y_axis(y_axis);
+        .y_axis(y_axis)
+        .legend_position(Some(LegendPosition::TopLeft));
     f.render_widget(chart, area);
 }
 
