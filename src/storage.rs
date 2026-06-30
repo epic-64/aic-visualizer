@@ -2,7 +2,7 @@
 //!
 //! A conversation file is plain text: a few `# key: value` headers carrying
 //! the model, followed by one raw turn description per line. This makes saved
-//! conversations self-contained — they restore their own model and prices.
+//! conversations self-contained; they restore their own model and prices.
 
 use std::fs;
 use std::io;
@@ -18,7 +18,7 @@ pub struct SavedConversation {
     pub turns: Vec<String>,
     /// The file this conversation was read from, for later deletion. The on-disk
     /// filename is derived from a sanitized name, so it can't be reconstructed
-    /// reliably from `name` alone — we keep the real path instead.
+    /// reliably from `name` alone, so we keep the real path instead.
     pub path: PathBuf,
 }
 
@@ -112,7 +112,7 @@ fn parse(content: &str, path: &Path) -> Option<SavedConversation> {
         } else if let Some(v) = l.strip_prefix("# context:") {
             context = v.trim().parse().unwrap_or(1_000_000);
         } else if l.starts_with('#') {
-            // Unknown header — ignore.
+            // Unknown header; ignore.
         } else {
             turns.push(l.to_string());
         }

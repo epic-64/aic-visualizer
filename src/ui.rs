@@ -67,8 +67,8 @@ fn model_select(f: &mut Frame, app: &App) {
             );
             let prices = Span::styled(
                 format!(
-                    "in ${:.2}  out ${:.2}  cached ${:.2}  / 1M",
-                    m.input_per_m, m.output_per_m, m.cached_per_m
+                    "out ${:>6.2}   in ${:>6.2}   cached ${:>6.2}   / 1M",
+                    m.output_per_m, m.input_per_m, m.cached_per_m
                 ),
                 Style::default().fg(Color::Gray),
             );
@@ -82,7 +82,10 @@ fn model_select(f: &mut Frame, app: &App) {
             .title(" Models ")
             .border_style(Style::default().fg(ACCENT)),
     );
-    f.render_widget(list, chunks[1]);
+    // Center the table: content row is 66 cols wide (2 marker + 16 name + 48
+    // prices) plus the box border, and one row per model plus the border.
+    let area = centered(chunks[1], 70, app.models.len() as u16 + 2);
+    f.render_widget(list, area);
 
     let help = Line::from(vec![
         key("↑/↓"), Span::raw(" move  "),
@@ -308,7 +311,7 @@ fn chat(f: &mut Frame, app: &App) {
         .label(format!("{} / {} tokens  ({:.1}%)", fmt_int(used), fmt_int(max), pct));
     f.render_widget(gauge, chunks[3]);
 
-    // History — most recent turns, newest at the bottom. Markers are woven
+    // History: most recent turns, newest at the bottom. Markers are woven
     // in at their recorded positions as un-numbered separator lines.
     let mut lines: Vec<Line> = Vec::new();
     let push_markers = |lines: &mut Vec<Line>, pos: usize| {
@@ -382,7 +385,7 @@ fn chat(f: &mut Frame, app: &App) {
     app.history_max_scroll.set(bottom);
     let scroll = bottom.saturating_sub(app.scroll_up.min(bottom));
     let scrolled = scroll < bottom;
-    let title = if scrolled { " Turns (scrolled — wheel down for newer) " } else { " Turns " };
+    let title = if scrolled { " Turns (scrolled; wheel down for newer) " } else { " Turns " };
     let history = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0))
@@ -436,13 +439,13 @@ fn tab_bar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Right-hand panel: two stacked charts — total (cumulative) cost on top,
+/// Right-hand panel: two stacked charts. Total (cumulative) cost on top,
 /// per-turn cost on the bottom. They get separate y-axes because the scales
 /// diverge sharply (the total climbs far above any single turn).
 fn cost_graph(f: &mut Frame, app: &App, area: Rect) {
     if app.turns.is_empty() {
         let placeholder = Paragraph::new(Span::styled(
-            "No turns yet — the graphs fill in as you send turns.",
+            "No turns yet. The graphs fill in as you send turns.",
             Style::default().fg(Color::DarkGray),
         ))
         .wrap(Wrap { trim: true })
@@ -495,7 +498,7 @@ fn cost_graph(f: &mut Frame, app: &App, area: Rect) {
     let dim = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
 
     // Total chart overlays every tab (dim-first so the active one draws on
-    // top). The per-turn chart shows only the active tab — overlaying every
+    // top). The per-turn chart shows only the active tab; overlaying every
     // tab's bars there made it too noisy to read.
     let mut total_series: Vec<Series> = Vec::new();
     let mut turn_series: Vec<Series> = Vec::new();
