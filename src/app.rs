@@ -51,6 +51,29 @@ fn marker_raw(label: &str) -> String {
     }
 }
 
+/// Pull an inline marker out of a turn line. If any comma/semicolon-separated
+/// segment is a `marker` / `marker: text` directive, return the line with that
+/// segment removed together with the marker's label; otherwise return the line
+/// (rejoined) and `None`. Only the first such segment is treated as a marker.
+fn extract_inline_marker(line: &str) -> (String, Option<String>) {
+    let mut label = None;
+    let mut kept = Vec::new();
+    for segment in line.split([',', ';']) {
+        let seg = segment.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        if label.is_none() {
+            if let Some(l) = marker_label(seg) {
+                label = Some(l);
+                continue;
+            }
+        }
+        kept.push(seg.to_string());
+    }
+    (kept.join(", "), label)
+}
+
 /// An open conversation tab. Holds everything that distinguishes one
 /// conversation from another. The *active* tab's data lives in the App's
 /// "live" fields (turns, input, …); this struct is where an inactive tab's
@@ -478,6 +501,10 @@ impl App {
             self.markers.push(Marker { after: self.turns.len(), label });
             return true;
         }
+        // A marker may also ride inside a turn line (e.g. "300 prompt, 400 out,
+        // marker: reviewed"). Strip it out before billing so the stored turn
+        // stays a plain description, then drop the marker after the turn below.
+        let (raw, inline_marker) = extract_inline_marker(&raw);
         let Some(model) = self.model().cloned() else {
             return false;
         };
@@ -515,6 +542,11 @@ impl App {
             // was already cached now becomes cached input for the next turn.
             // Thinking tokens are excluded — they don't enter the context.
             self.carried_cached = cached + parsed.input + parsed.output;
+        }
+
+        // Drop the inline marker (if any) after the turn(s) just billed.
+        if let Some(label) = inline_marker {
+            self.markers.push(Marker { after: self.turns.len(), label });
         }
         true
     }
@@ -855,5 +887,47 @@ impl App {
                 TabSummary { label, active }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_inline_marker_pulls_label_and_cleans_line() {
+        let (line, label) = extract_inline_marker("300 prompt, 400 out, marker: reviewed");
+        assert_eq!(line, "300 prompt, 400 out");
+        assert_eq!(label.as_deref(), Some("reviewed"));
+    }
+
+    #[test]
+    fn extract_inline_marker_without_label() {
+        let (line, label) = extract_inline_marker("300 prompt; 400 out; marker");
+        assert_eq!(line, "300 prompt, 400 out");
+        assert_eq!(label.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn extract_inline_marker_absent_leaves_line() {
+        let (line, label) = extract_inline_marker("300 prompt, 400 out");
+        assert_eq!(line, "300 prompt, 400 out");
+        assert_eq!(label, None);
+    }
+
+    #[test]
+    fn inline_marker_billed_turn_then_marker_after_it() {
+        let mut app = App::new();
+        app.active_model = Some(0);
+        assert!(app.apply_turn("300 prompt, 400 out, marker: here".into()));
+        // The turn is billed and stored without the marker text.
+        assert_eq!(app.turns.len(), 1);
+        assert_eq!(app.turns[0].raw, "300 prompt, 400 out");
+        assert_eq!(app.turns[0].input, 300);
+        assert_eq!(app.turns[0].output, 400);
+        // The marker lands right after that turn.
+        assert_eq!(app.markers.len(), 1);
+        assert_eq!(app.markers[0].after, 1);
+        assert_eq!(app.markers[0].label, "here");
     }
 }
