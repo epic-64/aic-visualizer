@@ -132,7 +132,7 @@ impl StartItem {
             StartItem::Saved { name, model, turns, .. } => {
                 // Markers are saved as turn lines too; don't count them.
                 let n = turns.iter().filter(|t| marker_label(t).is_none()).count();
-                format!("Saved: {name}  — {} ({} turns)", model.name, n)
+                format!("Saved: {name}  - {} ({} turns)", model.name, n)
             }
         }
     }
@@ -282,7 +282,7 @@ impl App {
         })
     }
 
-    /// Tokens currently occupying the context window — i.e. everything that
+    /// Tokens currently occupying the context window; i.e. everything that
     /// carries into the next turn as cache.
     pub fn context_used(&self) -> u64 {
         self.carried_cached
@@ -381,8 +381,8 @@ impl App {
                 self.active_model = Some(idx);
                 self.selected = idx;
                 self.load_turns(turns);
-                // load_turns resets state, so record the source name afterwards
-                // — it defaults the save prompt so re-saving overrides this file.
+                // load_turns resets state, so record the source name afterwards.
+                // It defaults the save prompt so re-saving overrides this file.
                 self.conv_name = Some(name);
             }
         }
@@ -540,7 +540,7 @@ impl App {
 
             // Everything this turn (prompt + tool inputs + outputs) plus what
             // was already cached now becomes cached input for the next turn.
-            // Thinking tokens are excluded — they don't enter the context.
+            // Thinking tokens are excluded; they don't enter the context.
             self.carried_cached = cached + parsed.input + parsed.output;
         }
 
@@ -716,7 +716,7 @@ impl App {
         }
     }
 
-    /// Called when the user edits the input directly — drop the history cursor.
+    /// Called when the user edits the input directly; drop the history cursor.
     pub fn on_input_edit(&mut self) {
         self.history_pos = None;
     }
@@ -881,7 +881,7 @@ impl App {
                 let model_name = model_idx
                     .and_then(|m| self.models.get(m))
                     .map(|m| m.name.as_str())
-                    .unwrap_or("—");
+                    .unwrap_or("-");
                 let cost: f64 = turns.iter().map(|t| t.cost).sum();
                 let label = format!("{}:{} ({}·${:.3})", i + 1, model_name, turns.len(), cost);
                 TabSummary { label, active }
