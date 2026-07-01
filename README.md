@@ -107,3 +107,7 @@ Conversations are saved as plain-text files under
 `~/.token-visualizer/conversations/`. Each file carries its model and prices in
 `# key: value` headers followed by one turn (or marker) per line, so a saved
 conversation restores itself completely on reload.
+
+## License
+
+Released under the [MIT License](LICENSE).
