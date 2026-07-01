@@ -536,9 +536,10 @@ fn cost_graph(f: &mut Frame, app: &App, area: Rect) {
     let marker_xs: Vec<f64> = app.markers.iter().map(|m| m.after as f64 + 0.5).collect();
 
     // Markers split the active conversation into segments; label each segment
-    // (start→marker, marker→marker, marker→end) with its summed cost, centred
-    // over the segment. Skipped when there are no markers (one whole segment).
-    let mut seg_labels: Vec<(f64, String)> = Vec::new();
+    // (start→marker, marker→marker, marker→end) with two centred rows: the
+    // running total from the start up to that segment's end marker, and the
+    // cost of the segment alone. Skipped when there are no markers.
+    let mut seg_labels: Vec<SegmentLabel> = Vec::new();
     if !app.markers.is_empty() {
         let turn_n = app.turns.len();
         let mut bounds: Vec<usize> = vec![0, turn_n];
@@ -547,11 +548,16 @@ fn cost_graph(f: &mut Frame, app: &App, area: Rect) {
         bounds.dedup();
         for w in bounds.windows(2) {
             let (p, q) = (w[0], w[1]);
-            let cost: f64 = app.turns[p..q].iter().map(|t| t.cost).sum();
+            let segment: f64 = app.turns[p..q].iter().map(|t| t.cost).sum();
+            let total: f64 = app.turns[..q].iter().map(|t| t.cost).sum();
             // Boundary p sits at data-x p + 0.5, so the segment's midpoint is
             // ((p + 0.5) + (q + 0.5)) / 2.
             let mid = (p as f64 + q as f64 + 1.0) / 2.0;
-            seg_labels.push((mid, format!("${cost:.4}")));
+            seg_labels.push(SegmentLabel {
+                mid,
+                total: format!("Σ ${total:.2}"),
+                segment: format!("+ ${segment:.2}"),
+            });
         }
     }
 
@@ -579,6 +585,15 @@ fn cost_graph(f: &mut Frame, app: &App, area: Rect) {
 /// A single plotted series: legend name, style, shape, and its data points.
 type Series<'a> = (&'a str, Style, GraphType, &'a [(f64, f64)]);
 
+/// A per-segment annotation on the total-cost chart: its horizontal midpoint
+/// (in data-x) and the two label rows drawn there — the running `total` up to
+/// the segment's end marker, and the `segment`'s own cost.
+struct SegmentLabel {
+    mid: f64,
+    total: String,
+    segment: String,
+}
+
 /// One tab's computed cost series, ready to plot. `active` marks the tab the
 /// user is currently viewing (drawn bright; the others are dimmed underlays).
 struct TabChart {
@@ -600,7 +615,7 @@ fn cost_chart(
     data_max: f64,
     marker_xs: &[f64],
     show_legend: bool,
-    segment_labels: &[(f64, String)],
+    segment_labels: &[SegmentLabel],
 ) {
     // Headroom so the top isn't flush against the border.
     let y_max = (data_max * 1.1).max(0.0001);
@@ -684,7 +699,7 @@ fn draw_segment_labels(
     area: Rect,
     n: f64,
     y_label_widths: &[u16; 3],
-    segment_labels: &[(f64, String)],
+    segment_labels: &[SegmentLabel],
 ) {
     if segment_labels.is_empty() || n <= 0.0 {
         return;
@@ -701,15 +716,25 @@ fn draw_segment_labels(
     if graph_w == 0 {
         return;
     }
-    let style = Style::default().fg(Color::Gray).add_modifier(Modifier::DIM);
-    for (vx, text) in segment_labels {
+    // Running total on top (brighter), the segment's own cost just below (dim).
+    // The second row is only drawn when there's vertical room for it.
+    let total_style = Style::default().fg(Color::Gray);
+    let segment_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM);
+    let has_second_row = inner.height >= 2;
+    for seg in segment_labels {
         // x-axis bounds are [0.5, n + 0.5]; map the midpoint into the plot.
-        let frac = ((vx - 0.5) / n).clamp(0.0, 1.0);
+        let frac = ((seg.mid - 0.5) / n).clamp(0.0, 1.0);
         let center = graph_x as f64 + frac * graph_w.saturating_sub(1) as f64;
-        let w = text.chars().count() as u16;
-        let start = (center - w as f64 / 2.0).round().max(graph_x as f64) as u16;
-        let start = start.min(graph_x + graph_w.saturating_sub(w));
-        f.buffer_mut().set_stringn(start, inner.top(), text, graph_w as usize, style);
+        let mut draw_row = |row: u16, text: &str, style: Style| {
+            let w = text.chars().count() as u16;
+            let start = (center - w as f64 / 2.0).round().max(graph_x as f64) as u16;
+            let start = start.min(graph_x + graph_w.saturating_sub(w));
+            f.buffer_mut().set_stringn(start, inner.top() + row, text, graph_w as usize, style);
+        };
+        draw_row(0, &seg.total, total_style);
+        if has_second_row {
+            draw_row(1, &seg.segment, segment_style);
+        }
     }
 }
 
