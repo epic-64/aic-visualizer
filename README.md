@@ -1,8 +1,13 @@
+[![Built With Ratatui](https://img.shields.io/badge/Built_With_Ratatui-000?logo=ratatui&logoColor=fff)](https://ratatui.rs/)
+
 # token-visualizer
 
 A terminal UI for simulating LLM conversations and visualizing their token
 usage and cost. Describe each turn in plain language, pick a pricing model, and
 watch the per-turn and cumulative cost build up as context accumulates.
+
+![screen1.png](docs/screen1.png)
+![screen2.png](docs/screen2.png)
 
 ## Requirements
 
@@ -42,11 +47,9 @@ Turns are free-form; the parser picks out the numbers and what they refer to.
 Numbers may use `k`/`m` suffixes. Examples:
 
 ```
-300 tokens prompt, 12000 tokens tool inputs, 4000 tokens response
-300 prompt, 12k tool input, 4k response
-input 1.5k, output 4k, cached 10k
-500 reasoning, 1000 response
-300 prompt, 5000 tools, 400 out, repeat 10
+2k instructions, 2k skills, 10k tool defs, 1k prompt, 1k output
+500 in, 500 out
+500 in, 500 out, 500 thinking, repeat 10, marker: after review
 ```
 
 Keywords: `prompt`/`input`/`tools`/`instructions` → input, `out`/`response`/
